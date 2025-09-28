@@ -2,15 +2,6 @@
 /// On-chain Kahoot game system with encrypted questions using Seal and Walrus storage
 module room::room;
 
-use seal::bf_hmac_encryption::{
-    EncryptedObject,
-    VerifiedDerivedKey,
-    PublicKey,
-    decrypt,
-    new_public_key,
-    verify_derived_keys,
-    parse_encrypted_object
-};
 use std::bcs;
 use std::string::{Self, String};
 use sui::bcs::{BCS, new};
@@ -518,6 +509,6 @@ public fun create_room_and_cap(
     transfer::transfer(creator_cap, ctx.sender());
 }
 
-entry fun seal_approve() {
-    assert!(true, ENoAccess);
+entry fun seal_approve(id: address, ctx: &mut TxContext) {
+    assert!(ctx.sender() == id, ENoAccess);
 }
