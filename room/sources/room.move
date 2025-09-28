@@ -2,7 +2,18 @@
 /// On-chain Kahoot game system with encrypted questions using Seal and Walrus storage
 module room::room;
 
+use seal::bf_hmac_encryption::{
+    EncryptedObject,
+    VerifiedDerivedKey,
+    PublicKey,
+    decrypt,
+    new_public_key,
+    verify_derived_keys,
+    parse_encrypted_object
+};
+use std::bcs;
 use std::string::{Self, String};
+use sui::bcs::{BCS, new};
 use sui::clock::{Self, Clock};
 use sui::event;
 use sui::hash;
@@ -24,23 +35,21 @@ const EQuestionNotActive: u64 = 7;
 const EAlreadyAnswered: u64 = 8;
 const ETimeExpired: u64 = 9;
 const EInvalidQuestionIndex: u64 = 10;
+const ENoAccess: u64 = 11;
 
 // ======== Structs ========
 
 /// Represents an encrypted question stored on Walrus
 public struct EncryptedQuestion has copy, drop, store {
     walrus_hash: String, // Hash returned by Walrus for the encrypted question
-    sealed_data: vector<u8>, // Encrypted question data using Seal
-    answer_hash: vector<u8>, // Hash of the correct answer
-    points: u64, // Points awarded for correct answer
 }
 
 /// Represents a decrypted question (revealed during gameplay)
+/// Hot potato
 public struct Question has copy, drop, store {
     text: String,
     options: vector<String>,
     correct_answer_hash: vector<u8>,
-    points: u64,
     revealed_at: u64,
 }
 
@@ -118,7 +127,6 @@ public struct QuestionRevealed has copy, drop {
     question_index: u64,
     question_text: String,
     options: vector<String>,
-    points: u64,
 }
 
 public struct AnswerSubmitted has copy, drop {
@@ -161,7 +169,7 @@ public fun create_room(
 
     let room = GameRoom {
         id: room_id,
-        creator: tx_context::sender(ctx),
+        creator: ctx.sender(),
         title: title,
         description: description,
         encrypted_questions,
@@ -185,7 +193,7 @@ public fun create_room(
     // Emit room created event
     event::emit(RoomCreated {
         room_id: room_address,
-        creator: tx_context::sender(ctx),
+        creator: ctx.sender(),
         title: room.title,
         total_questions: vector::length(&room.encrypted_questions),
     });
@@ -195,7 +203,7 @@ public fun create_room(
 
 /// Join a game room as a participant
 public fun join_room(room: &mut GameRoom, clock: &Clock, ctx: &mut TxContext) {
-    let participant_addr = tx_context::sender(ctx);
+    let participant_addr = ctx.sender();
     assert!(room.status == 0, ERoomNotOpen);
     assert!(vector::length(&room.participant_addresses) < room.max_participants, ERoomFull);
     assert!(!table::contains(&room.participants, participant_addr), EAlreadyJoined);
@@ -225,25 +233,25 @@ public fun start_game(
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
-    assert!(room.creator == tx_context::sender(ctx), ENotCreator);
+    assert!(room.creator == ctx.sender(), ENotCreator);
     assert!(room.status == 0, ERoomNotOpen);
     assert!(vector::length(&room.participant_addresses) > 0, ERoomNotOpen);
 
     room.status = 1; // Started
 
     // Reveal first question
-    reveal_question(room, 0, clock, ctx);
+    // reveal_question(room, 0, clock, ctx);
 
     // Emit game started event
     event::emit(GameStarted {
         room_id: object::uid_to_address(&room.id),
-        started_by: tx_context::sender(ctx),
+        started_by: ctx.sender(),
         total_participants: vector::length(&room.participant_addresses),
     });
 }
 
 /// Reveal a question by decrypting it on-chain (simplified decryption logic)
-fun reveal_question(room: &mut GameRoom, question_index: u64, clock: &Clock, _ctx: &TxContext) {
+/* fun reveal_question(room: &mut GameRoom, question_index: u64, clock: &Clock, _ctx: &TxContext) {
     assert!(question_index < vector::length(&room.encrypted_questions), EInvalidQuestionIndex);
 
     let encrypted_q = vector::borrow(&room.encrypted_questions, question_index);
@@ -256,7 +264,6 @@ fun reveal_question(room: &mut GameRoom, question_index: u64, clock: &Clock, _ct
         text: question_text,
         options: options,
         correct_answer_hash: encrypted_q.answer_hash,
-        points: encrypted_q.points,
         revealed_at: clock::timestamp_ms(clock),
     };
 
@@ -271,13 +278,12 @@ fun reveal_question(room: &mut GameRoom, question_index: u64, clock: &Clock, _ct
         question_index,
         question_text: revealed_q.text,
         options: revealed_q.options,
-        points: revealed_q.points,
     });
-}
+} */
 
 /// Submit an answer for the current question
 public fun submit_answer(room: &mut GameRoom, answer: String, clock: &Clock, ctx: &mut TxContext) {
-    let participant_addr = tx_context::sender(ctx);
+    let participant_addr = ctx.sender();
     assert!(room.status == 1, ERoomNotStarted);
     assert!(table::contains(&room.participants, participant_addr), ENotParticipant);
 
@@ -295,7 +301,9 @@ public fun submit_answer(room: &mut GameRoom, answer: String, clock: &Clock, ctx
 
     // Check if answer is correct by comparing hashes
     let is_correct = answer_hash == current_question.correct_answer_hash;
-    let points_earned = if (is_correct) current_question.points else 0;
+
+    // @todo: implement point scoring based on answer speed and correctness
+    let points_earned = if (is_correct) 1 else 0;
 
     // Record the answer
     let participant_answer = ParticipantAnswer {
@@ -325,7 +333,7 @@ public fun next_question(
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
-    assert!(room.creator == tx_context::sender(ctx), ENotCreator);
+    assert!(room.creator == ctx.sender(), ENotCreator);
     assert!(room.status == 1, ERoomNotStarted);
 
     let next_index = room.current_question_index + 1;
@@ -341,10 +349,7 @@ public fun next_question(
     if (next_index >= vector::length(&room.encrypted_questions)) {
         // Game completed, calculate final leaderboard
         complete_game(room, ctx);
-    } else {
-        // Reveal next question
-        reveal_question(room, next_index, clock, ctx);
-    }
+    } else {}
 }
 
 /// Complete the game and determine winner
@@ -450,14 +455,14 @@ public fun get_room_info(room: &GameRoom): (String, String, u8, u64, u64, u64) {
 }
 
 /// Get current question if revealed
-public fun get_current_question(room: &GameRoom): (String, vector<String>, u64, u64) {
+public fun get_current_question(room: &GameRoom): (String, vector<String>, u64) {
     assert!(
         table::contains(&room.revealed_questions, room.current_question_index),
         EQuestionNotActive,
     );
 
     let question = table::borrow(&room.revealed_questions, room.current_question_index);
-    (question.text, question.options, question.points, room.question_start_time)
+    (question.text, question.options, room.question_start_time)
 }
 
 /// Get participant score
@@ -485,17 +490,9 @@ public fun has_answered_current_question(room: &GameRoom, participant: address):
 // ======== Utility Functions ========
 
 /// Create a new encrypted question
-public fun new_encrypted_question(
-    walrus_hash: String,
-    sealed_data: vector<u8>,
-    answer_hash: vector<u8>,
-    points: u64,
-): EncryptedQuestion {
+public fun new_encrypted_question(walrus_hash: String): EncryptedQuestion {
     EncryptedQuestion {
         walrus_hash,
-        sealed_data,
-        answer_hash,
-        points,
     }
 }
 
@@ -518,5 +515,9 @@ public fun create_room_and_cap(
     );
 
     transfer::share_object(room);
-    transfer::transfer(creator_cap, tx_context::sender(ctx));
+    transfer::transfer(creator_cap, ctx.sender());
+}
+
+entry fun seal_approve() {
+    assert!(true, ENoAccess);
 }
